@@ -1,134 +1,96 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
-
-// Remember to rename these classes and interfaces!
-
-interface MyPluginSettings {
-	mySetting: string;
-}
-
-const DEFAULT_SETTINGS: MyPluginSettings = {
-	mySetting: 'default'
-}
+import { Plugin } from "obsidian";
+import {
+	PluginValue,
+	ViewPlugin,
+	ViewUpdate,
+	EditorView,
+	Decoration,
+	DecorationSet,
+	WidgetType,
+	PluginSpec,
+} from "@codemirror/view";
+import { syntaxTree } from "@codemirror/language";
+import { RangeSetBuilder } from "@codemirror/state";
 
 export default class MyPlugin extends Plugin {
-	settings: MyPluginSettings;
-
 	async onload() {
-		await this.loadSettings();
+		this.registerEditorExtension([noteplanLinkPlugin]);
+	}
 
-		// This creates an icon in the left ribbon.
-		const ribbonIconEl = this.addRibbonIcon('dice', 'Sample Plugin', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
-		});
-		// Perform additional things with the ribbon
-		ribbonIconEl.addClass('my-plugin-ribbon-class');
+	onunload(): void {}
+}
 
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status Bar Text');
+class NoteplanLinkPlugin implements PluginValue {
+	decorations: DecorationSet;
 
-		// This adds a simple command that can be triggered anywhere
-		this.addCommand({
-			id: 'open-sample-modal-simple',
-			name: 'Open sample modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
-			}
-		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'sample-editor-command',
-			name: 'Sample editor command',
-			editorCallback: (editor: Editor, view: MarkdownView) => {
-				console.log(editor.getSelection());
-				editor.replaceSelection('Sample Editor Command');
-			}
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-sample-modal-complex',
-			name: 'Open sample modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
+	constructor(view: EditorView) {
+		this.decorations = this.buildDecorations(view);
+	}
+
+	update(update: ViewUpdate) {
+		if (update.docChanged || update.viewportChanged) {
+			this.decorations = this.buildDecorations(update.view);
+		}
+	}
+
+	destroy() {}
+
+	buildDecorations(view: EditorView): DecorationSet {
+		const builder = new RangeSetBuilder<Decoration>();
+		const allDecorations: { start: number; end: number; decoration: Decoration }[] = [];
+
+		for (const { from, to } of view.visibleRanges) {
+			syntaxTree(view.state).iterate({
+				from,
+				to,
+				enter(node) {
+					const text = view.state.doc.sliceString(node.from, node.to);
+					const regex = /(\d{4}(?:-(?:W(?:0[1-9]|[1-4]\d|5[0-3])|(?:0[1-9]|1[0-2])(?:-(?:0[1-9]|[12]\d|3[01]))?|Q[1-4]))|\d{4})/g;
+					const matches = Array.from(text.matchAll(regex));
+
+					for (const match of matches) {
+						if (match.index !== undefined) {
+							const start = node.from + match.index;
+							const end = start + match[0].length;
+							allDecorations.push({
+								start,
+								end,
+								decoration: Decoration.replace({
+									widget: new NoteplanLinkWidget(match[0]),
+								}),
+							});
+						}
 					}
+				},
+			});
+		}
 
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
-				}
-			}
-		});
+		// Sort all decorations
+		allDecorations.sort((a, b) => a.start - b.start);
 
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
-
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			console.log('click', evt);
-		});
-
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
-	}
-
-	onunload() {
-
-	}
-
-	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
-	}
-
-	async saveSettings() {
-		await this.saveData(this.settings);
+		// Add sorted decorations to the builder
+		for (const { start, end, decoration } of allDecorations) {
+			builder.add(start, end, decoration);
+		}
+		return builder.finish();
 	}
 }
 
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
+class NoteplanLinkWidget extends WidgetType {
+	constructor(private date: string) {
+		super();
 	}
 
-	onOpen() {
-		const {contentEl} = this;
-		contentEl.setText('Woah!');
-	}
-
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
+	toDOM(view: EditorView): HTMLElement {
+		const link = document.createElement("a");
+		link.href = `noteplan://x-callback-url/openNote?noteDate=${this.date}`;
+		link.textContent = this.date;
+		link.className = "cm-noteplan-link";
+		return link;
 	}
 }
 
-class SampleSettingTab extends PluginSettingTab {
-	plugin: MyPlugin;
-
-	constructor(app: App, plugin: MyPlugin) {
-		super(app, plugin);
-		this.plugin = plugin;
-	}
-
-	display(): void {
-		const {containerEl} = this;
-
-		containerEl.empty();
-
-		new Setting(containerEl)
-			.setName('Setting #1')
-			.setDesc('It\'s a secret')
-			.addText(text => text
-				.setPlaceholder('Enter your secret')
-				.setValue(this.plugin.settings.mySetting)
-				.onChange(async (value) => {
-					this.plugin.settings.mySetting = value;
-					await this.plugin.saveSettings();
-				}));
-	}
-}
+const pluginSpec: PluginSpec<NoteplanLinkPlugin> = {
+	decorations: (value: NoteplanLinkPlugin) => value.decorations,
+};
+const noteplanLinkPlugin = ViewPlugin.fromClass(NoteplanLinkPlugin, pluginSpec);
